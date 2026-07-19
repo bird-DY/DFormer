@@ -102,16 +102,15 @@ We invite all to contribute in making it more acessible and useful. If you have 
 **0. Install**
 
 ```bash
-conda create -n dformer python=3.10 -y
+bash scripts/setup_server_env.sh --name dformer
 conda activate dformer
-
-# CUDA 11.8
-conda install pytorch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 pytorch-cuda=11.8 -c pytorch -c nvidia
-
-pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
-
-pip install tqdm opencv-python scipy tensorboardX tabulate easydict ftfy regex
+python scripts/verify_environment.py
 ```
+
+The script installs a pinned Python 3.10 / PyTorch 2.1.2 / CUDA 11.8
+environment and the `mmcv-full==1.7.2` build required by the vendored
+MMSegmentation 0.29.1 code. See [ENVIRONMENT_CN.md](ENVIRONMENT_CN.md) for the
+manual explanation and troubleshooting guide.
 
 
 **1. Download Datasets and Checkpoints.**
