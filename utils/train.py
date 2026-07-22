@@ -44,6 +44,24 @@ parser.add_argument("--amp", default=True, action=argparse.BooleanOptionalAction
 parser.add_argument("--val_amp", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--pad_SUNRGBD", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--use_seed", default=True, action=argparse.BooleanOptionalAction)
+parser.add_argument(
+    "--micro_batch_size",
+    default=None,
+    type=int,
+    help="Per-process training batch size. Use with --grad_accum_steps to preserve the configured effective batch size.",
+)
+parser.add_argument(
+    "--grad_accum_steps",
+    default=1,
+    type=int,
+    help="Number of micro-batches to accumulate before each optimizer update.",
+)
+parser.add_argument(
+    "--val_batch_size",
+    default=None,
+    type=int,
+    help="Validation batch size. Defaults to the training batch-size-derived value.",
+)
 parser.add_argument("--local-rank", default=0)
 # parser.add_argument('--save_path', '-p', default=None)
 
@@ -111,6 +129,32 @@ with Engine(custom_parser=parser) as engine:
     args = parser.parse_args()
 
     config = getattr(import_module(args.config), "C")
+    if args.grad_accum_steps < 1:
+        raise ValueError("--grad_accum_steps must be at least 1")
+    if args.val_batch_size is not None and args.val_batch_size < 1:
+        raise ValueError("--val_batch_size must be at least 1")
+
+    configured_batch_size = int(config.batch_size)
+    configured_niters_per_epoch = int(config.niters_per_epoch)
+    if args.micro_batch_size is not None:
+        if args.micro_batch_size < 1:
+            raise ValueError("--micro_batch_size must be at least 1")
+        effective_batch_size = args.micro_batch_size * args.grad_accum_steps
+        if effective_batch_size != configured_batch_size:
+            raise ValueError(
+                "micro batch size times gradient accumulation steps must equal "
+                f"the configured batch size ({args.micro_batch_size} * {args.grad_accum_steps} "
+                f"!= {configured_batch_size})"
+            )
+        config.effective_batch_size = configured_batch_size
+        config.batch_size = args.micro_batch_size
+        # Preserve the configured number of optimizer updates and sampled images per epoch.
+        config.niters_per_epoch = configured_niters_per_epoch * args.grad_accum_steps
+    elif args.grad_accum_steps != 1:
+        raise ValueError("--micro_batch_size is required when --grad_accum_steps is greater than 1")
+    else:
+        config.effective_batch_size = configured_batch_size
+
     logger = get_logger(config.log_dir, config.log_file, rank=engine.local_rank)
     # check if pad_SUNRGBD is used correctly
     if args.pad_SUNRGBD and config.dataset_name != "SUNRGBD":
@@ -157,13 +201,27 @@ with Engine(custom_parser=parser) as engine:
         val_dl_factor = 1.5
 
     val_dl_factor = 1  # TODO: remove this line
+    val_batch_size = (
+        args.val_batch_size
+        if args.val_batch_size is not None
+        else (int(config.batch_size * val_dl_factor) if config.dataset_name != "SUNRGBD" else int(args.gpus))
+    )
     val_loader, val_sampler = get_val_loader(
         engine,
         RGBXDataset,
         config,
-        val_batch_size=int(config.batch_size * val_dl_factor) if config.dataset_name != "SUNRGBD" else int(args.gpus),
+        val_batch_size=val_batch_size,
     )
     logger.info(f"val dataset len:{len(val_loader) * int(args.gpus)}")
+    logger.info(
+        "batch setup: micro_batch_size=%d, grad_accum_steps=%d, effective_batch_size=%d, "
+        "optimizer_updates_per_epoch=%d, val_batch_size=%d",
+        config.batch_size,
+        args.grad_accum_steps,
+        config.effective_batch_size,
+        (config.niters_per_epoch + args.grad_accum_steps - 1) // args.grad_accum_steps,
+        val_batch_size,
+    )
 
     if (engine.distributed and (engine.local_rank == 0)) or (not engine.distributed):
         tb_dir = config.tb_dir + "/{}".format(time.strftime("%b%d_%d-%H-%M", time.localtime()))
@@ -224,12 +282,13 @@ with Engine(custom_parser=parser) as engine:
     else:
         raise NotImplementedError
 
-    total_iteration = config.nepochs * config.niters_per_epoch
+    optimizer_updates_per_epoch = (config.niters_per_epoch + args.grad_accum_steps - 1) // args.grad_accum_steps
+    total_iteration = config.nepochs * optimizer_updates_per_epoch
     lr_policy = WarmUpPolyLR(
         base_lr,
         config.lr_power,
         total_iteration,
-        config.niters_per_epoch * config.warm_up_epoch,
+        optimizer_updates_per_epoch * config.warm_up_epoch,
     )
     if engine.distributed:
         logger.info(".............distributed training.............")
@@ -249,7 +308,7 @@ with Engine(custom_parser=parser) as engine:
     if engine.continue_state_object:
         engine.restore_checkpoint()
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     logger.info("begin trainning:")
     data_setting = {
@@ -305,6 +364,12 @@ with Engine(custom_parser=parser) as engine:
         train_timer.start()
         for idx in range(config.niters_per_epoch):
             engine.update_iteration(epoch, idx)
+            accumulation_group_start = (idx // args.grad_accum_steps) * args.grad_accum_steps
+            accumulation_group_size = min(
+                args.grad_accum_steps,
+                config.niters_per_epoch - accumulation_group_start,
+            )
+            should_update = (idx + 1) % args.grad_accum_steps == 0 or idx + 1 == config.niters_per_epoch
 
             # minibatch = dataloader.next()
             minibatch = next(dataloader)
@@ -326,30 +391,31 @@ with Engine(custom_parser=parser) as engine:
             if engine.distributed:
                 reduce_loss = all_reduce_tensor(loss, world_size=engine.world_size)
 
+            loss_for_backward = loss / accumulation_group_size
+            lr = optimizer.param_groups[0]["lr"]
+
             if args.amp:
-                # Scales loss. Calls ``backward()`` on scaled loss to create scaled gradients.
-                scaler.scale(loss).backward()
-                # otherwise, optimizer.step() is skipped.
-                scaler.step(optimizer)
-                # Updates the scale for next iteration.
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)  # TODO: check if set_to_none=True impact the performance
+                # Scale each micro-batch loss, but update parameters only at an accumulation boundary.
+                scaler.scale(loss_for_backward).backward()
+                if should_update:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
             else:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                loss_for_backward.backward()
+                if should_update:
+                    if epoch == 1:
+                        for name, param in model.named_parameters():
+                            if param.grad is None:
+                                logger.warning(f"{name} has no grad, please check")
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
-            if not args.amp:
-                if epoch == 1:
-                    for name, param in model.named_parameters():
-                        if param.grad is None:
-                            logger.warning(f"{name} has no grad, please check")
-
-            current_idx = (epoch - 1) * config.niters_per_epoch + idx
-            lr = lr_policy.get_lr(current_idx)
-
-            for i in range(len(optimizer.param_groups)):
-                optimizer.param_groups[i]["lr"] = lr
+            if should_update:
+                optimizer_update_idx = (epoch - 1) * optimizer_updates_per_epoch + idx // args.grad_accum_steps
+                next_lr = lr_policy.get_lr(optimizer_update_idx)
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = next_lr
 
             if engine.distributed:
                 sum_loss += reduce_loss.item()
@@ -361,11 +427,12 @@ with Engine(custom_parser=parser) as engine:
                 )
 
             else:
-                sum_loss += loss
+                loss_value = loss.detach().item()
+                sum_loss += loss_value
                 print_str = (
                     f"Epoch {epoch}/{config.nepochs} "
                     + f"Iter {idx + 1}/{config.niters_per_epoch}: "
-                    + f"lr={lr:.4e} loss={loss:.4f} total_loss={(sum_loss / (idx + 1)):.4f}"
+                    + f"lr={lr:.4e} loss={loss_value:.4f} total_loss={(sum_loss / (idx + 1)):.4f}"
                 )
 
             if ((idx + 1) % int((config.niters_per_epoch) * 0.1) == 0 or idx == 0) and (
@@ -373,7 +440,7 @@ with Engine(custom_parser=parser) as engine:
             ):
                 print(print_str)
 
-            del loss
+            del loss, loss_for_backward
             # pbar.set_description(print_str, refresh=False)
         logger.info(print_str)
         train_timer.stop()
