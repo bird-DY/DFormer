@@ -188,7 +188,7 @@ def get_train_loader(engine, dataset, config):
     return train_loader, train_sampler
 
 
-def get_val_loader(engine, dataset, config, val_batch_size=1):
+def get_val_loader(engine, dataset, config, val_batch_size=1, depth_corruption=None):
     data_setting = {
         "rgb_root": config.rgb_root_folder,
         "rgb_format": config.rgb_format,
@@ -204,6 +204,7 @@ def get_val_loader(engine, dataset, config, val_batch_size=1):
         "class_names": config.class_names,
         "dataset_name": config.dataset_name,
         "backbone": config.backbone,
+        "depth_corruption": depth_corruption,
     }
     val_preprocess = ValPre(config.norm_mean, config.norm_std, config.x_is_single_channel, config)
 

@@ -174,6 +174,8 @@ train*.sh
 eval*.sh
 infer*.sh
 .ruff_cache
+run_logs/
+validation_reports/
 
 # temp ignore:
 **/*_temp*

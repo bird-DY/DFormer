@@ -16,6 +16,7 @@ from torch.nn.parallel import DistributedDataParallel
 from val_mm import evaluate, evaluate_msf
 
 from utils.dataloader.dataloader import get_val_loader
+from utils.dataloader.depth_corruptions import DEPTH_CORRUPTIONS, build_depth_corruptor
 from utils.dataloader.RGBXDataset import RGBXDataset
 from utils.engine.engine import Engine
 from utils.engine.logger import get_logger
@@ -42,6 +43,23 @@ parser.add_argument("--syncbn", default=True, action=argparse.BooleanOptionalAct
 parser.add_argument("--mst", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--amp", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--pad_SUNRGBD", default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument("--val_batch_size", default=1, type=int, help="validation batch size")
+parser.add_argument(
+    "--depth_corruption",
+    default="clean",
+    choices=DEPTH_CORRUPTIONS,
+    help="deterministic corruption applied only to validation depth images before normalization",
+)
+parser.add_argument("--corruption_seed", default=12345, type=int)
+parser.add_argument("--missing_rate", default=0.3, type=float)
+parser.add_argument(
+    "--noise_std",
+    default=0.03,
+    type=float,
+    help="Gaussian noise standard deviation relative to the 8-bit depth range",
+)
+parser.add_argument("--shift_x", default=4, type=int, help="horizontal depth translation in pixels")
+parser.add_argument("--shift_y", default=0, type=int, help="vertical depth translation in pixels")
 parser.add_argument(
     "--report_dir",
     default="validation_reports",
@@ -127,6 +145,12 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
         "dataset": config.dataset_name,
         "model": config.backbone,
         "checkpoint": str(args.continue_fpath),
+        "depth_corruption": args.depth_corruption,
+        "corruption_seed": int(args.corruption_seed),
+        "missing_rate": float(args.missing_rate),
+        "noise_std": float(args.noise_std),
+        "shift_x": int(args.shift_x),
+        "shift_y": int(args.shift_y),
         "num_images": int(num_images),
         "num_classes": int(config.num_classes),
         "multi_scale_flip": bool(args.mst),
@@ -168,7 +192,7 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-    report_stem = f"{config.dataset_name}_{config.backbone}_{timestamp}"
+    report_stem = f"{config.dataset_name}_{config.backbone}_{args.depth_corruption}_{timestamp}"
     json_path = report_dir / f"{report_stem}.json"
     csv_path = report_dir / f"{report_stem}.csv"
 
@@ -196,6 +220,9 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
 with Engine(custom_parser=parser) as engine:
     args = parser.parse_args()
     config = getattr(import_module(args.config), "C")
+    if args.val_batch_size < 1:
+        raise ValueError("--val_batch_size must be at least 1")
+    depth_corruption = build_depth_corruptor(args)
     logger = get_logger(config.log_dir, config.log_file, rank=engine.local_rank)
     # check if pad_SUNRGBD is used correctly
     if args.pad_SUNRGBD and config.dataset_name != "SUNRGBD":
@@ -208,12 +235,7 @@ with Engine(custom_parser=parser) as engine:
     config.pad = args.pad_SUNRGBD
 
     cudnn.benchmark = True
-    if config.dataset_name != "SUNRGBD":
-        val_batch_size = int(config.batch_size)
-    elif not args.pad_SUNRGBD:
-        val_batch_size = int(args.gpus)
-    else:
-        val_batch_size = 8 * int(args.gpus)
+    val_batch_size = args.val_batch_size
 
     if args.mst:
         val_loader, val_sampler = get_val_loader(
@@ -221,6 +243,7 @@ with Engine(custom_parser=parser) as engine:
             RGBXDataset,
             config,
             val_batch_size=val_batch_size,
+            depth_corruption=depth_corruption,
         )
     else:
         val_loader, val_sampler = get_val_loader(
@@ -228,6 +251,7 @@ with Engine(custom_parser=parser) as engine:
             RGBXDataset,
             config,
             val_batch_size=val_batch_size,
+            depth_corruption=depth_corruption,
         )
     logger.info(f"val dataset len:{len(val_loader) * int(args.gpus)}")
 

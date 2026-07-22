@@ -30,6 +30,36 @@ for required_file in \
     fi
 done
 
+clean_env=(
+    env
+    -u PYTHONHOME
+    -u CUDA_HOME
+    -u LD_LIBRARY_PATH
+    -u LD_PRELOAD
+    "CUDA_VISIBLE_DEVICES=$GPU_ID"
+    LOCAL_RANK=0
+    PYTHONNOUSERSITE=1
+    PYTHONUNBUFFERED=1
+    "PYTHONPATH=$REPO_ROOT"
+)
+
+echo "Checking the isolated PyTorch/MMCV CUDA runtime..."
+"${clean_env[@]}" "$PYTHON_BIN" -c '
+import torch
+from mmcv.ops import get_compiling_cuda_version
+
+if torch.version.cuda is None:
+    raise RuntimeError("A CPU-only PyTorch build is installed")
+if not torch.cuda.is_available():
+    raise RuntimeError("PyTorch cannot access the selected CUDA device")
+
+print("Torch path:", torch.__file__)
+print("Torch:", torch.__version__)
+print("Torch CUDA:", torch.version.cuda)
+print("MMCV CUDA:", get_compiling_cuda_version())
+print("GPU:", torch.cuda.get_device_name(0))
+'
+
 mkdir -p run_logs
 run_id="$(date +%Y%m%d-%H%M%S)"
 log_file="run_logs/A0_clean_dformerv2_s_gpu${GPU_ID}_${run_id}.log"
@@ -47,14 +77,7 @@ meta_file="run_logs/A0_clean_dformerv2_s_gpu${GPU_ID}_${run_id}.meta"
     echo "python=$PYTHON_BIN"
 } > "$meta_file"
 
-nohup env \
-    -u PYTHONHOME \
-    -u CUDA_HOME \
-    CUDA_VISIBLE_DEVICES="$GPU_ID" \
-    LOCAL_RANK=0 \
-    PYTHONNOUSERSITE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH="$REPO_ROOT" \
+nohup "${clean_env[@]}" \
     "$PYTHON_BIN" -u utils/train.py \
     --config=local_configs.NYUDepthv2.DFormerv2_S \
     --gpus=1 \

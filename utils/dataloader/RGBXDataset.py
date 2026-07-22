@@ -130,6 +130,7 @@ class RGBXDataset(data.Dataset):
         self.dataset_name = setting["dataset_name"]
         self.x_modal = setting.get("x_modal", ["d"])
         self.backbone = setting["backbone"]
+        self._depth_corruption = setting.get("depth_corruption")
 
     def __len__(self):
         if self._file_length is not None:
@@ -166,8 +167,10 @@ class RGBXDataset(data.Dataset):
         x = {}
         for modal in self.x_modal:
             if modal == "d":
-                x[modal] = self._open_image(path_dict[modal + "_path"], cv2.IMREAD_GRAYSCALE)
-                x[modal] = cv2.merge([x[modal], x[modal], x[modal]])
+                depth = self._open_image(path_dict[modal + "_path"], cv2.IMREAD_GRAYSCALE)
+                if self._split_name == "val" and self._depth_corruption is not None:
+                    depth = self._depth_corruption(depth, sample_id=item_name)
+                x[modal] = cv2.merge([depth, depth, depth])
             else:
                 x[modal] = self._open_image(path_dict[modal + "_path"], "RGB")
         if len(self.x_modal) == 1:
