@@ -1,14 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    cat <<'EOF'
+Usage:
+  bash scripts/run_depth_robustness_nyuv2_s.sh --gpu GPU_ID [options]
+
+Required:
+  --gpu GPU_ID                Physical GPU index shown by nvidia-smi.
+
+Options:
+  --checkpoint PATH           Checkpoint to evaluate.
+  --report-root PATH          Output directory for this five-condition run.
+  --python PATH               Python executable.
+  --seed N                    Corruption seed. Default: 12345.
+  --max-initial-memory-mb N   Refuse a GPU using more than this. Default: 2048.
+  -h, --help                  Show this message.
+
+Examples:
+  bash scripts/run_depth_robustness_nyuv2_s.sh --gpu 0
+  bash scripts/run_depth_robustness_nyuv2_s.sh --gpu 1 --checkpoint /path/to/best.pth
+EOF
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-GPU_ID="${GPU_ID:-0}"
-PYTHON_BIN="${PYTHON_BIN:-/media/dell/Data1/newenv/dformer/bin/python}"
-CHECKPOINT="${CHECKPOINT:-checkpoints/trained/NYU Depth v2/DFormerv2_Small_NYU.pth}"
-MAX_INITIAL_GPU_MEMORY_MB="${MAX_INITIAL_GPU_MEMORY_MB:-2048}"
-CORRUPTION_SEED="${CORRUPTION_SEED:-12345}"
+GPU_ID=""
+PYTHON_BIN="/media/dell/Data1/newenv/dformer/bin/python"
+CHECKPOINT="checkpoints/trained/NYU Depth v2/DFormerv2_Small_NYU.pth"
+REPORT_ROOT=""
+MAX_INITIAL_GPU_MEMORY_MB=2048
+CORRUPTION_SEED=12345
+
+while (($# > 0)); do
+    case "$1" in
+        --gpu)
+            [[ $# -ge 2 ]] || { echo "Missing value for --gpu" >&2; usage; exit 2; }
+            GPU_ID="$2"
+            shift 2
+            ;;
+        --checkpoint)
+            [[ $# -ge 2 ]] || { echo "Missing value for --checkpoint" >&2; usage; exit 2; }
+            CHECKPOINT="$2"
+            shift 2
+            ;;
+        --report-root)
+            [[ $# -ge 2 ]] || { echo "Missing value for --report-root" >&2; usage; exit 2; }
+            REPORT_ROOT="$2"
+            shift 2
+            ;;
+        --python)
+            [[ $# -ge 2 ]] || { echo "Missing value for --python" >&2; usage; exit 2; }
+            PYTHON_BIN="$2"
+            shift 2
+            ;;
+        --seed)
+            [[ $# -ge 2 ]] || { echo "Missing value for --seed" >&2; usage; exit 2; }
+            CORRUPTION_SEED="$2"
+            shift 2
+            ;;
+        --max-initial-memory-mb)
+            [[ $# -ge 2 ]] || { echo "Missing value for --max-initial-memory-mb" >&2; usage; exit 2; }
+            MAX_INITIAL_GPU_MEMORY_MB="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if [[ -z "$GPU_ID" ]]; then
+    echo "--gpu is required; no GPU is selected implicitly." >&2
+    usage
+    exit 2
+fi
+if [[ ! "$GPU_ID" =~ ^[0-9]+$ ]]; then
+    echo "--gpu must be a non-negative integer, got: $GPU_ID" >&2
+    exit 2
+fi
+if [[ ! "$CORRUPTION_SEED" =~ ^-?[0-9]+$ ]]; then
+    echo "--seed must be an integer, got: $CORRUPTION_SEED" >&2
+    exit 2
+fi
+if [[ ! "$MAX_INITIAL_GPU_MEMORY_MB" =~ ^[0-9]+$ ]]; then
+    echo "--max-initial-memory-mb must be a non-negative integer" >&2
+    exit 2
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
     echo "Python executable not found: $PYTHON_BIN" >&2
@@ -24,7 +109,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     initial_gpu_memory="$(printf '%s\n' "$initial_gpu_memory" | head -n 1 | tr -d '[:space:]')"
     if [[ "$initial_gpu_memory" =~ ^[0-9]+$ ]] && ((initial_gpu_memory > MAX_INITIAL_GPU_MEMORY_MB)); then
         echo "GPU $GPU_ID already uses ${initial_gpu_memory} MiB; refusing to compete with the active job." >&2
-        echo "Wait for the GPU to become idle, select another idle GPU with GPU_ID, or explicitly raise MAX_INITIAL_GPU_MEMORY_MB." >&2
+        echo "Wait for it to become idle, pass another --gpu value, or explicitly raise --max-initial-memory-mb." >&2
         exit 1
     fi
 fi
