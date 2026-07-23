@@ -55,6 +55,9 @@ def main():
                 "mean_f1_percent": summary["mean_f1_percent"],
                 "images_per_second": summary["images_per_second"],
                 "peak_gpu_memory_mb": summary["peak_gpu_memory_mb"],
+                "gpu_memory_free_at_start_mb": summary.get("gpu_memory_free_at_start_mb", 0),
+                "gpu_memory_budget_mb": summary.get("gpu_memory_budget_mb", 0),
+                "gpu_memory_reserve_mb": summary.get("gpu_memory_reserve_mb", 0),
             }
         )
 

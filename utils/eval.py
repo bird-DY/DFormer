@@ -45,6 +45,12 @@ parser.add_argument("--amp", default=True, action=argparse.BooleanOptionalAction
 parser.add_argument("--pad_SUNRGBD", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--val_batch_size", default=1, type=int, help="validation batch size")
 parser.add_argument(
+    "--gpu_memory_reserve_mb",
+    default=0,
+    type=int,
+    help="leave this much GPU memory unallocated by the evaluation process (best effort)",
+)
+parser.add_argument(
     "--depth_corruption",
     default="clean",
     choices=DEPTH_CORRUPTIONS,
@@ -165,6 +171,10 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
         "elapsed_seconds": round(elapsed_seconds, 3),
         "images_per_second": round(fps, 3),
         "peak_gpu_memory_mb": round(peak_gpu_memory_mb, 2),
+        "gpu_memory_total_mb": int(args.gpu_memory_total_mb),
+        "gpu_memory_free_at_start_mb": int(args.gpu_memory_free_at_start_mb),
+        "gpu_memory_budget_mb": int(args.gpu_memory_budget_mb),
+        "gpu_memory_reserve_mb": int(args.gpu_memory_reserve_mb),
         "total_parameters": int(total_params),
         "trainable_parameters": int(trainable_params),
     }
@@ -222,6 +232,8 @@ with Engine(custom_parser=parser) as engine:
     config = getattr(import_module(args.config), "C")
     if args.val_batch_size < 1:
         raise ValueError("--val_batch_size must be at least 1")
+    if args.gpu_memory_reserve_mb < 0:
+        raise ValueError("--gpu_memory_reserve_mb must be non-negative")
     depth_corruption = build_depth_corruptor(args)
     logger = get_logger(config.log_dir, config.log_file, rank=engine.local_rank)
     # check if pad_SUNRGBD is used correctly
@@ -233,6 +245,33 @@ with Engine(custom_parser=parser) as engine:
     if (not args.pad_SUNRGBD) and config.backbone.startswith("DFormerv2") and config.dataset_name == "SUNRGBD":
         raise ValueError("DFormerv2 is not recommended without pad_SUNRGBD")
     config.pad = args.pad_SUNRGBD
+
+    args.gpu_memory_total_mb = 0
+    args.gpu_memory_free_at_start_mb = 0
+    args.gpu_memory_budget_mb = 0
+    if torch.cuda.is_available():
+        free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+        reserve_bytes = args.gpu_memory_reserve_mb * 1024**2
+        budget_bytes = free_bytes - reserve_bytes
+        if budget_bytes <= 0:
+            raise RuntimeError(
+                f"GPU has {free_bytes / 1024**2:.0f} MiB free, which is not greater than "
+                f"the requested {args.gpu_memory_reserve_mb} MiB reserve"
+            )
+        if args.gpu_memory_reserve_mb > 0:
+            memory_fraction = min(budget_bytes / total_bytes, 1.0)
+            torch.cuda.set_per_process_memory_fraction(memory_fraction, device=0)
+
+        args.gpu_memory_total_mb = total_bytes // 1024**2
+        args.gpu_memory_free_at_start_mb = free_bytes // 1024**2
+        args.gpu_memory_budget_mb = budget_bytes // 1024**2
+        logger.info(
+            "GPU memory at evaluation start: total=%d MiB, free=%d MiB, budget=%d MiB, reserve=%d MiB",
+            args.gpu_memory_total_mb,
+            args.gpu_memory_free_at_start_mb,
+            args.gpu_memory_budget_mb,
+            args.gpu_memory_reserve_mb,
+        )
 
     cudnn.benchmark = True
     val_batch_size = args.val_batch_size

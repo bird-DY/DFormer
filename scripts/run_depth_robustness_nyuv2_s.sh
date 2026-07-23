@@ -14,7 +14,7 @@ Options:
   --report-root PATH          Output directory for this five-condition run.
   --python PATH               Python executable.
   --seed N                    Corruption seed. Default: 12345.
-  --max-initial-memory-mb N   Refuse a GPU using more than this. Default: 2048.
+  --reserve-memory-mb N       Keep this much GPU memory free. Default: 4096.
   -h, --help                  Show this message.
 
 Examples:
@@ -30,7 +30,7 @@ GPU_ID=""
 PYTHON_BIN="/media/dell/Data1/newenv/dformer/bin/python"
 CHECKPOINT="checkpoints/trained/NYU Depth v2/DFormerv2_Small_NYU.pth"
 REPORT_ROOT=""
-MAX_INITIAL_GPU_MEMORY_MB=2048
+GPU_MEMORY_RESERVE_MB=4096
 CORRUPTION_SEED=12345
 
 while (($# > 0)); do
@@ -60,9 +60,9 @@ while (($# > 0)); do
             CORRUPTION_SEED="$2"
             shift 2
             ;;
-        --max-initial-memory-mb)
-            [[ $# -ge 2 ]] || { echo "Missing value for --max-initial-memory-mb" >&2; usage; exit 2; }
-            MAX_INITIAL_GPU_MEMORY_MB="$2"
+        --reserve-memory-mb)
+            [[ $# -ge 2 ]] || { echo "Missing value for --reserve-memory-mb" >&2; usage; exit 2; }
+            GPU_MEMORY_RESERVE_MB="$2"
             shift 2
             ;;
         -h|--help)
@@ -90,8 +90,8 @@ if [[ ! "$CORRUPTION_SEED" =~ ^-?[0-9]+$ ]]; then
     echo "--seed must be an integer, got: $CORRUPTION_SEED" >&2
     exit 2
 fi
-if [[ ! "$MAX_INITIAL_GPU_MEMORY_MB" =~ ^[0-9]+$ ]]; then
-    echo "--max-initial-memory-mb must be a non-negative integer" >&2
+if [[ ! "$GPU_MEMORY_RESERVE_MB" =~ ^[0-9]+$ ]]; then
+    echo "--reserve-memory-mb must be a non-negative integer" >&2
     exit 2
 fi
 
@@ -105,12 +105,15 @@ if [[ ! -f "$CHECKPOINT" ]]; then
 fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-    initial_gpu_memory="$(nvidia-smi -i "$GPU_ID" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null || true)"
-    initial_gpu_memory="$(printf '%s\n' "$initial_gpu_memory" | head -n 1 | tr -d '[:space:]')"
-    if [[ "$initial_gpu_memory" =~ ^[0-9]+$ ]] && ((initial_gpu_memory > MAX_INITIAL_GPU_MEMORY_MB)); then
-        echo "GPU $GPU_ID already uses ${initial_gpu_memory} MiB; refusing to compete with the active job." >&2
-        echo "Wait for it to become idle, pass another --gpu value, or explicitly raise --max-initial-memory-mb." >&2
+    free_gpu_memory="$(nvidia-smi -i "$GPU_ID" --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
+    free_gpu_memory="$(printf '%s\n' "$free_gpu_memory" | head -n 1 | tr -d '[:space:]')"
+    if [[ "$free_gpu_memory" =~ ^[0-9]+$ ]] && ((free_gpu_memory <= GPU_MEMORY_RESERVE_MB)); then
+        echo "GPU $GPU_ID has ${free_gpu_memory} MiB free, not enough for a ${GPU_MEMORY_RESERVE_MB} MiB reserve." >&2
         exit 1
+    fi
+    if [[ "$free_gpu_memory" =~ ^[0-9]+$ ]]; then
+        echo "GPU $GPU_ID: ${free_gpu_memory} MiB free; reserving ${GPU_MEMORY_RESERVE_MB} MiB."
+        echo "Evaluation memory budget: $((free_gpu_memory - GPU_MEMORY_RESERVE_MB)) MiB."
     fi
 fi
 
@@ -142,6 +145,7 @@ run_eval() {
         --config=local_configs.NYUDepthv2.DFormerv2_S \
         --gpus=1 \
         --val_batch_size=1 \
+        --gpu_memory_reserve_mb="$GPU_MEMORY_RESERVE_MB" \
         --no-syncbn \
         --amp \
         --no-compile \
