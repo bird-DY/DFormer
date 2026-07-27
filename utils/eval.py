@@ -41,6 +41,22 @@ parser.add_argument("--compile", default=False, action=argparse.BooleanOptionalA
 parser.add_argument("--compile_mode", default="default")
 parser.add_argument("--syncbn", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--mst", default=True, action=argparse.BooleanOptionalAction)
+parser.add_argument(
+    "--eval_scales",
+    nargs="+",
+    type=float,
+    default=None,
+    help=(
+        "evaluation scales, for example --eval_scales 1.0 or "
+        "--eval_scales 0.5 0.75 1.0 1.25 1.5; overrides the scale choice implied by --mst"
+    ),
+)
+parser.add_argument(
+    "--flip",
+    default=None,
+    action=argparse.BooleanOptionalAction,
+    help="enable horizontal-flip test-time augmentation; overrides the flip choice implied by --mst",
+)
 parser.add_argument("--amp", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument("--pad_SUNRGBD", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--val_batch_size", default=1, type=int, help="validation batch size")
@@ -159,7 +175,10 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
         "shift_y": int(args.shift_y),
         "num_images": int(num_images),
         "num_classes": int(config.num_classes),
-        "multi_scale_flip": bool(args.mst),
+        "eval_scales": [float(scale) for scale in args.eval_scales],
+        "multi_scale": len(args.eval_scales) > 1,
+        "flip": bool(args.flip),
+        "multi_scale_flip": len(args.eval_scales) > 1 and bool(args.flip),
         "sliding_window": bool(args.sliding),
         "amp": bool(args.amp),
         "miou_percent": round(miou, 2),
@@ -234,6 +253,15 @@ with Engine(custom_parser=parser) as engine:
         raise ValueError("--val_batch_size must be at least 1")
     if args.gpu_memory_reserve_mb < 0:
         raise ValueError("--gpu_memory_reserve_mb must be non-negative")
+    # Keep --mst/--no-mst backward compatible while allowing scale and flip
+    # test-time augmentation to be controlled independently.
+    if args.eval_scales is None:
+        args.eval_scales = [0.5, 0.75, 1.0, 1.25, 1.5] if args.mst else [1.0]
+    if any(scale <= 0 for scale in args.eval_scales):
+        raise ValueError("--eval_scales values must all be greater than zero")
+    if args.flip is None:
+        args.flip = bool(args.mst)
+    args.use_msf = len(args.eval_scales) > 1 or args.flip
     depth_corruption = build_depth_corruptor(args)
     logger = get_logger(config.log_dir, config.log_file, rank=engine.local_rank)
     # check if pad_SUNRGBD is used correctly
@@ -359,14 +387,14 @@ with Engine(custom_parser=parser) as engine:
                 with torch.no_grad():
                     model.eval()
                     device = torch.device("cuda")
-                    if args.mst:
+                    if args.use_msf:
                         all_metrics = evaluate_msf(
                             model,
                             val_loader,
                             config,
                             device,
-                            [0.5, 0.75, 1.0, 1.25, 1.5],
-                            True,
+                            args.eval_scales,
+                            args.flip,
                             engine,
                             sliding=args.sliding,
                         )
@@ -395,14 +423,14 @@ with Engine(custom_parser=parser) as engine:
                 with torch.no_grad():
                     model.eval()
                     device = torch.device("cuda")
-                    if args.mst:
+                    if args.use_msf:
                         metric = evaluate_msf(
                             model,
                             val_loader,
                             config,
                             device,
-                            [0.5, 0.75, 1.0, 1.25, 1.5],
-                            True,
+                            args.eval_scales,
+                            args.flip,
                             engine,
                             sliding=args.sliding,
                         )
@@ -428,14 +456,14 @@ with Engine(custom_parser=parser) as engine:
             with torch.no_grad():
                 model.eval()
                 device = torch.device("cuda")
-                if args.mst:
+                if args.use_msf:
                     all_metrics = evaluate_msf(
                         model,
                         val_loader,
                         config,
                         device,
-                        [0.5, 0.75, 1.0, 1.25, 1.5],
-                        True,
+                        args.eval_scales,
+                        args.flip,
                         engine,
                         sliding=args.sliding,
                     )
@@ -464,14 +492,14 @@ with Engine(custom_parser=parser) as engine:
             with torch.no_grad():
                 model.eval()
                 device = torch.device("cuda")
-                if args.mst:
+                if args.use_msf:
                     metric = evaluate_msf(
                         model,
                         val_loader,
                         config,
                         device,
-                        [0.5, 0.75, 1.0, 1.25, 1.5],
-                        True,
+                        args.eval_scales,
+                        args.flip,
                         engine,
                         sliding=args.sliding,
                     )
