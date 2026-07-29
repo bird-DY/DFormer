@@ -45,6 +45,12 @@ parser.add_argument("--val_amp", default=True, action=argparse.BooleanOptionalAc
 parser.add_argument("--pad_SUNRGBD", default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument("--use_seed", default=True, action=argparse.BooleanOptionalAction)
 parser.add_argument(
+    "--seed",
+    default=None,
+    type=int,
+    help="override the random seed from the selected config; effective only when --use_seed is enabled",
+)
+parser.add_argument(
     "--micro_batch_size",
     default=None,
     type=int,
@@ -133,6 +139,8 @@ with Engine(custom_parser=parser) as engine:
         raise ValueError("--grad_accum_steps must be at least 1")
     if args.val_batch_size is not None and args.val_batch_size < 1:
         raise ValueError("--val_batch_size must be at least 1")
+    if args.seed is not None:
+        config.seed = args.seed
 
     configured_batch_size = int(config.batch_size)
     configured_niters_per_epoch = int(config.niters_per_epoch)
