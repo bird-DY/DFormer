@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import pprint
+import re
 import time
 from importlib import import_module
 from pathlib import Path
@@ -82,6 +83,21 @@ parser.add_argument(
 )
 parser.add_argument("--shift_x", default=4, type=int, help="horizontal depth translation in pixels")
 parser.add_argument("--shift_y", default=0, type=int, help="vertical depth translation in pixels")
+parser.add_argument("--block_size", default=128, type=int, help="square missing-region size in pixels")
+parser.add_argument("--block_count", default=1, type=int, help="number of square missing regions")
+parser.add_argument("--blur_kernel", default=5, type=int, help="odd Gaussian-blur kernel size")
+parser.add_argument("--depth_scale", default=1.0, type=float, help="multiplicative depth-scale factor")
+parser.add_argument("--outlier_rate", default=0.03, type=float, help="fraction of valid pixels replaced by random depth")
+parser.add_argument(
+    "--condition_id",
+    default=None,
+    help="stable benchmark condition identifier; defaults to the corruption name",
+)
+parser.add_argument(
+    "--benchmark_protocol",
+    default="custom",
+    help="benchmark protocol recorded in JSON reports",
+)
 parser.add_argument(
     "--report_dir",
     default="validation_reports",
@@ -163,16 +179,24 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
         torch.cuda.max_memory_allocated() / (1024**2) if torch.cuda.is_available() else 0.0
     )
 
+    condition_id = args.condition_id or args.depth_corruption
     summary = {
         "dataset": config.dataset_name,
         "model": config.backbone,
         "checkpoint": str(args.continue_fpath),
+        "condition_id": condition_id,
+        "benchmark_protocol": args.benchmark_protocol,
         "depth_corruption": args.depth_corruption,
         "corruption_seed": int(args.corruption_seed),
         "missing_rate": float(args.missing_rate),
         "noise_std": float(args.noise_std),
         "shift_x": int(args.shift_x),
         "shift_y": int(args.shift_y),
+        "block_size": int(args.block_size),
+        "block_count": int(args.block_count),
+        "blur_kernel": int(args.blur_kernel),
+        "depth_scale": float(args.depth_scale),
+        "outlier_rate": float(args.outlier_rate),
         "num_images": int(num_images),
         "num_classes": int(config.num_classes),
         "eval_scales": [float(scale) for scale in args.eval_scales],
@@ -221,7 +245,8 @@ def report_metrics(metric, config, model, args, elapsed_seconds, num_images):
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-    report_stem = f"{config.dataset_name}_{config.backbone}_{args.depth_corruption}_{timestamp}"
+    safe_condition_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", condition_id)
+    report_stem = f"{config.dataset_name}_{config.backbone}_{safe_condition_id}_{timestamp}"
     json_path = report_dir / f"{report_stem}.json"
     csv_path = report_dir / f"{report_stem}.csv"
 

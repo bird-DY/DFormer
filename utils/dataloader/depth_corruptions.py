@@ -1,13 +1,31 @@
 import hashlib
 
+import cv2
 import numpy as np
 
 
-DEPTH_CORRUPTIONS = ("clean", "random_missing", "gaussian_noise", "shift", "zero")
+DEPTH_CORRUPTIONS = (
+    "clean",
+    "random_missing",
+    "block_missing",
+    "gaussian_noise",
+    "gaussian_blur",
+    "shift",
+    "zero",
+    "mean_fill",
+    "depth_scale",
+    "random_outlier",
+)
 
 
 class DepthCorruptor:
-    """Apply a deterministic corruption to an unnormalized single-channel depth image."""
+    """Apply a deterministic corruption to an unnormalized single-channel depth image.
+
+    NYUv2 depth images in this repository are read as 8-bit grayscale images. Noise
+    magnitudes are therefore expressed relative to the 255-value input range. Invalid
+    source pixels are represented by zero and are preserved by corruptions other than
+    complete-modality replacements (``zero`` and ``mean_fill``).
+    """
 
     def __init__(
         self,
@@ -17,6 +35,11 @@ class DepthCorruptor:
         noise_std=0.03,
         shift_x=4,
         shift_y=0,
+        block_size=128,
+        block_count=1,
+        blur_kernel=5,
+        depth_scale=1.0,
+        outlier_rate=0.03,
     ):
         if name not in DEPTH_CORRUPTIONS:
             raise ValueError(f"Unknown depth corruption: {name}")
@@ -24,6 +47,16 @@ class DepthCorruptor:
             raise ValueError("missing_rate must be in [0, 1]")
         if noise_std < 0.0:
             raise ValueError("noise_std must be non-negative")
+        if block_size < 1:
+            raise ValueError("block_size must be a positive integer")
+        if block_count < 1:
+            raise ValueError("block_count must be a positive integer")
+        if blur_kernel < 1 or blur_kernel % 2 == 0:
+            raise ValueError("blur_kernel must be a positive odd integer")
+        if depth_scale <= 0.0:
+            raise ValueError("depth_scale must be greater than zero")
+        if not 0.0 <= outlier_rate <= 1.0:
+            raise ValueError("outlier_rate must be in [0, 1]")
 
         self.name = name
         self.seed = int(seed)
@@ -31,6 +64,11 @@ class DepthCorruptor:
         self.noise_std = float(noise_std)
         self.shift_x = int(shift_x)
         self.shift_y = int(shift_y)
+        self.block_size = int(block_size)
+        self.block_count = int(block_count)
+        self.blur_kernel = int(blur_kernel)
+        self.depth_scale = float(depth_scale)
+        self.outlier_rate = float(outlier_rate)
 
     def _rng(self, sample_id):
         key = f"{self.name}:{self.seed}:{sample_id}".encode("utf-8")
@@ -60,6 +98,13 @@ class DepthCorruptor:
         ]
         return output
 
+    @staticmethod
+    def _cast_like(values, reference):
+        if np.issubdtype(reference.dtype, np.integer):
+            limits = np.iinfo(reference.dtype)
+            values = np.clip(np.rint(values), limits.min, limits.max)
+        return values.astype(reference.dtype)
+
     def __call__(self, depth, sample_id):
         if depth.ndim != 2:
             raise ValueError(f"DepthCorruptor expects a 2D image, got shape {depth.shape}")
@@ -74,6 +119,12 @@ class DepthCorruptor:
         valid_indices = np.flatnonzero(valid_mask)
         rng = self._rng(sample_id)
 
+        if self.name == "mean_fill":
+            if not np.any(valid_mask):
+                return np.zeros_like(depth)
+            mean_depth = float(depth[valid_mask].mean())
+            return self._cast_like(np.full(depth.shape, mean_depth, dtype=np.float32), depth)
+
         if self.name == "random_missing":
             output = depth.copy()
             missing_count = int(round(self.missing_rate * len(valid_indices)))
@@ -82,13 +133,65 @@ class DepthCorruptor:
                 output.flat[missing_indices] = 0
             return output
 
+        if self.name == "block_missing":
+            output = depth.copy()
+            height, width = output.shape
+            block_height = min(self.block_size, height)
+            block_width = min(self.block_size, width)
+            for _ in range(self.block_count):
+                top = int(rng.integers(0, height - block_height + 1))
+                left = int(rng.integers(0, width - block_width + 1))
+                output[top : top + block_height, left : left + block_width] = 0
+            return output
+
         if self.name == "gaussian_noise":
             output = depth.astype(np.float32, copy=True)
             noise = rng.normal(0.0, self.noise_std * 255.0, size=depth.shape)
             output[valid_mask] += noise[valid_mask]
-            output = np.clip(np.rint(output), 0.0, 255.0)
             output[~valid_mask] = 0.0
-            return output.astype(depth.dtype)
+            return self._cast_like(output, depth)
+
+        if self.name == "gaussian_blur":
+            blurred_depth = cv2.GaussianBlur(
+                depth.astype(np.float32),
+                (self.blur_kernel, self.blur_kernel),
+                sigmaX=0,
+                borderType=cv2.BORDER_REFLECT_101,
+            )
+            blurred_validity = cv2.GaussianBlur(
+                valid_mask.astype(np.float32),
+                (self.blur_kernel, self.blur_kernel),
+                sigmaX=0,
+                borderType=cv2.BORDER_REFLECT_101,
+            )
+            output = np.zeros_like(blurred_depth)
+            np.divide(
+                blurred_depth,
+                blurred_validity,
+                out=output,
+                where=blurred_validity > np.finfo(np.float32).eps,
+            )
+            output[~valid_mask] = 0.0
+            return self._cast_like(output, depth)
+
+        if self.name == "depth_scale":
+            output = depth.astype(np.float32, copy=True)
+            output[valid_mask] *= self.depth_scale
+            output[~valid_mask] = 0.0
+            return self._cast_like(output, depth)
+
+        if self.name == "random_outlier":
+            output = depth.copy()
+            outlier_count = int(round(self.outlier_rate * len(valid_indices)))
+            if outlier_count > 0:
+                outlier_indices = rng.choice(valid_indices, size=outlier_count, replace=False)
+                if np.issubdtype(depth.dtype, np.integer):
+                    upper_bound = int(np.iinfo(depth.dtype).max)
+                else:
+                    upper_bound = 255
+                values = rng.integers(1, upper_bound + 1, size=outlier_count)
+                output.flat[outlier_indices] = values.astype(depth.dtype)
+            return output
 
         raise AssertionError(f"Unhandled depth corruption: {self.name}")
 
@@ -101,4 +204,9 @@ def build_depth_corruptor(args):
         noise_std=args.noise_std,
         shift_x=args.shift_x,
         shift_y=args.shift_y,
+        block_size=args.block_size,
+        block_count=args.block_count,
+        blur_kernel=args.blur_kernel,
+        depth_scale=args.depth_scale,
+        outlier_rate=args.outlier_rate,
     )
