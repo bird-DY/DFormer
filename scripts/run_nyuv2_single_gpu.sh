@@ -16,6 +16,7 @@ Options:
   --micro-batch-size N        Override the conservative per-GPU default.
   --grad-accum-steps N        Override the accumulation default.
   --val-batch-size N          Default: 1.
+  --run-label LABEL           Optional filesystem-safe label for logs and metadata.
   -h, --help                  Show this message.
 
 Defaults for a 24 GiB RTX A5000:
@@ -39,6 +40,7 @@ PYTHON_BIN="/media/dell/Data1/newenv/dformer/bin/python"
 MICRO_BATCH_SIZE=""
 GRAD_ACCUM_STEPS=""
 VAL_BATCH_SIZE=1
+RUN_LABEL=""
 
 while (($# > 0)); do
     case "$1" in
@@ -77,6 +79,11 @@ while (($# > 0)); do
             VAL_BATCH_SIZE="$2"
             shift 2
             ;;
+        --run-label)
+            [[ $# -ge 2 ]] || { echo "Missing value for --run-label" >&2; exit 2; }
+            RUN_LABEL="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -100,6 +107,10 @@ if [[ ! "$GPU_ID" =~ ^[0-9]+$ ]]; then
 fi
 if [[ ! "$SEED" =~ ^-?[0-9]+$ ]]; then
     echo "--seed must be an integer, got: $SEED" >&2
+    exit 2
+fi
+if [[ -n "$RUN_LABEL" && ! "$RUN_LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "--run-label may contain only letters, digits, dot, underscore, and hyphen; got: $RUN_LABEL" >&2
     exit 2
 fi
 
@@ -192,18 +203,21 @@ print("Visible GPU:", torch.cuda.get_device_name(0))
 mkdir -p run_logs
 run_id="$(date +%Y%m%d-%H%M%S)"
 variant_lower="${VARIANT,,}"
-log_file="run_logs/nyuv2_dformerv2_${variant_lower}_seed${SEED}_gpu${GPU_ID}_${run_id}.log"
-pid_file="run_logs/nyuv2_dformerv2_${variant_lower}_seed${SEED}_gpu${GPU_ID}_${run_id}.pid"
-meta_file="run_logs/nyuv2_dformerv2_${variant_lower}_seed${SEED}_gpu${GPU_ID}_${run_id}.meta"
+run_prefix="${RUN_LABEL:-nyuv2_dformerv2_${variant_lower}}"
+log_file="run_logs/${run_prefix}_seed${SEED}_gpu${GPU_ID}_${run_id}.log"
+pid_file="run_logs/${run_prefix}_seed${SEED}_gpu${GPU_ID}_${run_id}.pid"
+meta_file="run_logs/${run_prefix}_seed${SEED}_gpu${GPU_ID}_${run_id}.meta"
 
 {
     echo "started_at=$(date --iso-8601=seconds)"
     echo "git_commit=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "variant=$VARIANT"
+    echo "run_label=${RUN_LABEL:-default}"
     echo "config=$CONFIG"
     echo "seed=$SEED"
     echo "gpu_id=$GPU_ID"
     echo "micro_batch_size=$MICRO_BATCH_SIZE"
+    echo "normalization_statistics_batch_size=$MICRO_BATCH_SIZE"
     echo "grad_accum_steps=$GRAD_ACCUM_STEPS"
     echo "effective_batch_size=$((MICRO_BATCH_SIZE * GRAD_ACCUM_STEPS))"
     echo "val_batch_size=$VAL_BATCH_SIZE"
