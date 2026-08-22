@@ -16,6 +16,10 @@ from val_mm import evaluate, evaluate_msf
 from models.builder import EncoderDecoder as segmodel
 from utils.dataloader.dataloader import get_train_loader, get_val_loader
 from utils.dataloader.RGBXDataset import RGBXDataset
+from utils.dataloader.depth_corruptions import (
+    TRAINING_DEPTH_CORRUPTION_PROFILES,
+    RandomTrainingDepthAugmentor,
+)
 from utils.engine.engine import Engine
 from utils.engine.logger import get_logger
 from utils.init_func import configure_optimizers, group_weight
@@ -67,6 +71,24 @@ parser.add_argument(
     default=None,
     type=int,
     help="Validation batch size. Defaults to the training batch-size-derived value.",
+)
+parser.add_argument(
+    "--train_depth_augmentation",
+    default=False,
+    action=argparse.BooleanOptionalAction,
+    help="randomly corrupt depth inputs during training while keeping RGB and labels clean",
+)
+parser.add_argument(
+    "--train_depth_corruption_probability",
+    default=0.5,
+    type=float,
+    help="probability that a training sample receives a depth corruption",
+)
+parser.add_argument(
+    "--train_depth_corruption_profile",
+    choices=tuple(TRAINING_DEPTH_CORRUPTION_PROFILES),
+    default="representative",
+    help="named mixture of training-time depth corruptions",
 )
 parser.add_argument("--local-rank", default=0)
 # parser.add_argument('--save_path', '-p', default=None)
@@ -139,6 +161,8 @@ with Engine(custom_parser=parser) as engine:
         raise ValueError("--grad_accum_steps must be at least 1")
     if args.val_batch_size is not None and args.val_batch_size < 1:
         raise ValueError("--val_batch_size must be at least 1")
+    if not 0.0 <= args.train_depth_corruption_probability <= 1.0:
+        raise ValueError("--train_depth_corruption_probability must be in [0, 1]")
     if args.seed is not None:
         config.seed = args.seed
 
@@ -185,7 +209,29 @@ with Engine(custom_parser=parser) as engine:
     if not args.compile and args.compile_mode != "default":
         logger.warning("compile_mode is only valid when compile is enabled, ignoring compile_mode")
 
-    train_loader, train_sampler = get_train_loader(engine, RGBXDataset, config)
+    train_depth_augmentor = None
+    if args.train_depth_augmentation:
+        if config.num_workers != 0:
+            raise ValueError("deterministic training depth augmentation currently requires config.num_workers == 0")
+        train_depth_augmentor = RandomTrainingDepthAugmentor(
+            probability=args.train_depth_corruption_probability,
+            profile=args.train_depth_corruption_profile,
+            seed=config.seed,
+        )
+
+    train_loader, train_sampler = get_train_loader(
+        engine,
+        RGBXDataset,
+        config,
+        depth_corruption=train_depth_augmentor,
+    )
+    if train_depth_augmentor is not None:
+        logger.info(
+            "training depth augmentation: probability=%.3f, profile=%s, conditions=%s",
+            train_depth_augmentor.probability,
+            train_depth_augmentor.profile,
+            ",".join(train_depth_augmentor.condition_ids),
+        )
 
     if args.gpus == 2:
         if args.mst and args.compile and args.compile_mode == "reduce-overhead":

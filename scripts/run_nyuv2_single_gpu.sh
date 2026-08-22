@@ -17,6 +17,11 @@ Options:
   --grad-accum-steps N        Override the accumulation default.
   --val-batch-size N          Default: 1.
   --run-label LABEL           Optional filesystem-safe label for logs and metadata.
+  --train-depth-augmentation  Enable random training-time depth corruption.
+  --train-depth-corruption-probability P
+                              Default: 0.5.
+  --train-depth-corruption-profile NAME
+                              Default: representative.
   -h, --help                  Show this message.
 
 Defaults for a 24 GiB RTX A5000:
@@ -41,6 +46,9 @@ MICRO_BATCH_SIZE=""
 GRAD_ACCUM_STEPS=""
 VAL_BATCH_SIZE=1
 RUN_LABEL=""
+TRAIN_DEPTH_AUGMENTATION=0
+TRAIN_DEPTH_CORRUPTION_PROBABILITY=0.5
+TRAIN_DEPTH_CORRUPTION_PROFILE="representative"
 
 while (($# > 0)); do
     case "$1" in
@@ -84,6 +92,20 @@ while (($# > 0)); do
             RUN_LABEL="$2"
             shift 2
             ;;
+        --train-depth-augmentation)
+            TRAIN_DEPTH_AUGMENTATION=1
+            shift
+            ;;
+        --train-depth-corruption-probability)
+            [[ $# -ge 2 ]] || { echo "Missing value for --train-depth-corruption-probability" >&2; exit 2; }
+            TRAIN_DEPTH_CORRUPTION_PROBABILITY="$2"
+            shift 2
+            ;;
+        --train-depth-corruption-profile)
+            [[ $# -ge 2 ]] || { echo "Missing value for --train-depth-corruption-profile" >&2; exit 2; }
+            TRAIN_DEPTH_CORRUPTION_PROFILE="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -111,6 +133,14 @@ if [[ ! "$SEED" =~ ^-?[0-9]+$ ]]; then
 fi
 if [[ -n "$RUN_LABEL" && ! "$RUN_LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "--run-label may contain only letters, digits, dot, underscore, and hyphen; got: $RUN_LABEL" >&2
+    exit 2
+fi
+if [[ ! "$TRAIN_DEPTH_CORRUPTION_PROBABILITY" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]]; then
+    echo "--train-depth-corruption-probability must be between 0 and 1; got: $TRAIN_DEPTH_CORRUPTION_PROBABILITY" >&2
+    exit 2
+fi
+if [[ "$TRAIN_DEPTH_CORRUPTION_PROFILE" != "representative" ]]; then
+    echo "--train-depth-corruption-profile must be representative; got: $TRAIN_DEPTH_CORRUPTION_PROFILE" >&2
     exit 2
 fi
 
@@ -223,7 +253,19 @@ meta_file="run_logs/${run_prefix}_seed${SEED}_gpu${GPU_ID}_${run_id}.meta"
     echo "val_batch_size=$VAL_BATCH_SIZE"
     echo "pretrained=$PRETRAINED"
     echo "python=$PYTHON_BIN"
+    echo "train_depth_augmentation=$TRAIN_DEPTH_AUGMENTATION"
+    echo "train_depth_corruption_probability=$TRAIN_DEPTH_CORRUPTION_PROBABILITY"
+    echo "train_depth_corruption_profile=$TRAIN_DEPTH_CORRUPTION_PROFILE"
 } > "$meta_file"
+
+train_depth_args=(--no-train_depth_augmentation)
+if [[ "$TRAIN_DEPTH_AUGMENTATION" -eq 1 ]]; then
+    train_depth_args=(
+        --train_depth_augmentation
+        "--train_depth_corruption_probability=$TRAIN_DEPTH_CORRUPTION_PROBABILITY"
+        "--train_depth_corruption_profile=$TRAIN_DEPTH_CORRUPTION_PROFILE"
+    )
+fi
 
 nohup "${clean_env[@]}" \
     "$PYTHON_BIN" -u utils/train.py \
@@ -240,6 +282,7 @@ nohup "${clean_env[@]}" \
     --no-mst \
     --no-sliding \
     --use_seed \
+    "${train_depth_args[@]}" \
     > "$log_file" 2>&1 &
 
 train_pid=$!

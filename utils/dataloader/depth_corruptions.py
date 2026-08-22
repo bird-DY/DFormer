@@ -18,6 +18,19 @@ DEPTH_CORRUPTIONS = (
 )
 
 
+TRAINING_DEPTH_CORRUPTION_PROFILES = {
+    "representative": (
+        ("random_missing_r030", "random_missing", {"missing_rate": 0.30}),
+        ("random_missing_r050", "random_missing", {"missing_rate": 0.50}),
+        ("gaussian_noise_s003", "gaussian_noise", {"noise_std": 0.03}),
+        ("gaussian_noise_s005", "gaussian_noise", {"noise_std": 0.05}),
+        ("shift_x04", "shift", {"shift_x": 4, "shift_y": 0}),
+        ("shift_x08", "shift", {"shift_x": 8, "shift_y": 0}),
+        ("zero", "zero", {}),
+    ),
+}
+
+
 class DepthCorruptor:
     """Apply a deterministic corruption to an unnormalized single-channel depth image.
 
@@ -194,6 +207,48 @@ class DepthCorruptor:
             return output
 
         raise AssertionError(f"Unhandled depth corruption: {self.name}")
+
+
+class RandomTrainingDepthAugmentor:
+    """Randomly corrupt training depth while preserving clean RGB and labels.
+
+    A dedicated RNG makes the augmentation sequence repeatable for a fixed seed.
+    The current NYUv2 configs use ``num_workers=0``, so the RNG has a single,
+    deterministic owner throughout training.
+    """
+
+    def __init__(self, probability=0.5, profile="representative", seed=12345):
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("training depth corruption probability must be in [0, 1]")
+        if profile not in TRAINING_DEPTH_CORRUPTION_PROFILES:
+            raise ValueError(f"Unknown training depth corruption profile: {profile}")
+
+        self.probability = float(probability)
+        self.profile = profile
+        self.seed = int(seed)
+        self._rng = np.random.default_rng(self.seed)
+        self._conditions = []
+        for condition_id, name, parameters in TRAINING_DEPTH_CORRUPTION_PROFILES[profile]:
+            self._conditions.append(
+                (
+                    condition_id,
+                    DepthCorruptor(name=name, seed=self.seed, **parameters),
+                )
+            )
+
+    @property
+    def condition_ids(self):
+        return tuple(condition_id for condition_id, _ in self._conditions)
+
+    def __call__(self, depth, sample_id):
+        if self._rng.random() >= self.probability:
+            return depth
+
+        condition_index = int(self._rng.integers(0, len(self._conditions)))
+        condition_id, corruptor = self._conditions[condition_index]
+        draw_id = int(self._rng.integers(0, np.iinfo(np.int64).max))
+        augmented_sample_id = f"train:{condition_id}:{sample_id}:{draw_id}"
+        return corruptor(depth, sample_id=augmented_sample_id)
 
 
 def build_depth_corruptor(args):

@@ -34,16 +34,21 @@ def random_scale(rgb, gt, modal_x, scales):
 
 
 class TrainPre(object):
-    def __init__(self, norm_mean, norm_std, sign=False, config=None):
+    def __init__(self, norm_mean, norm_std, sign=False, config=None, depth_corruption=None):
         self.config = config
         self.norm_mean = norm_mean
         self.norm_std = norm_std
         self.sign = sign
+        self.depth_corruption = depth_corruption
 
     def __call__(self, rgb, gt, modal_x):
         rgb, gt, modal_x = random_mirror(rgb, gt, modal_x)
         if self.config.train_scale_array is not None:
             rgb, gt, modal_x, scale = random_scale(rgb, gt, modal_x, self.config.train_scale_array)
+
+        if self.depth_corruption is not None:
+            depth = self.depth_corruption(modal_x[:, :, 0], sample_id="train")
+            modal_x = cv2.merge([depth, depth, depth])
 
         rgb = normalize(rgb, self.norm_mean, self.norm_std)
         if self.sign:
@@ -138,7 +143,7 @@ class ValPre(object):
         # return rgb, gt, modal_x
 
 
-def get_train_loader(engine, dataset, config):
+def get_train_loader(engine, dataset, config, depth_corruption=None):
     data_setting = {
         "rgb_root": config.rgb_root_folder,
         "rgb_format": config.rgb_format,
@@ -155,7 +160,13 @@ def get_train_loader(engine, dataset, config):
         "dataset_name": config.dataset_name,
         "backbone": config.backbone,
     }
-    train_preprocess = TrainPre(config.norm_mean, config.norm_std, config.x_is_single_channel, config)
+    train_preprocess = TrainPre(
+        config.norm_mean,
+        config.norm_std,
+        config.x_is_single_channel,
+        config,
+        depth_corruption=depth_corruption,
+    )
 
     train_dataset = dataset(
         data_setting,
